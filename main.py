@@ -16,7 +16,7 @@ ADMIN_ID = os.getenv("ADMIN_ID", "6416451659")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "-1003493006883")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1zvgEFhy29CRqliTra1kPdviEVP503hjLAxmy8axhys0")
 
-# Optional Google Sheets setup
+# Google Sheets Setup
 gspread_client = None
 sheet = None
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -90,7 +90,6 @@ def get_fallback_keyboard():
 # --- HELPER FUNCTIONS ---
 
 def save_to_google_sheets(row_data):
-    """Save user admission record to Google Sheets if configured"""
     if sheet:
         try:
             sheet.append_row([
@@ -106,11 +105,9 @@ def save_to_google_sheets(row_data):
             logging.error(f"Failed to append to Google Sheets: {e}")
 
 def complete_admission(chat_id, user_id, username, first_name, name, preparation, state):
-    """Complete the admission process, save data, create invite link, and notify user/admin."""
     tz = pytz.timezone("Asia/Kolkata")
     formatted_date = datetime.now(tz).strftime("%d/%m/%Y, %I:%M:%S %p")
     
-    # Store in admitted memory
     admitted[str(user_id)] = {
         "name": name,
         "preparation": preparation,
@@ -121,11 +118,9 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
         "date": formatted_date
     }
     
-    # Remove from active conversations
     if str(user_id) in conversations:
         del conversations[str(user_id)]
         
-    # Save to Google Sheets
     save_to_google_sheets({
         "userId": str(user_id),
         "name": name,
@@ -145,7 +140,6 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
         logging.error(f"Failed to create chat invite link: {e}")
         invite_link = "https://t.me"
 
-    # Send Success message to User with Invite Link
     success_text = (
         f"✅ *Admission Successful!*\n\n"
         f"🎓 Name: {name}\n"
@@ -157,7 +151,6 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
     markup.add(InlineKeyboardButton("🚀 Join Study Group Now", url=invite_link))
     bot.send_message(chat_id, success_text, reply_markup=markup)
     
-    # Send Notification to Admin
     admin_text = (
         f"🆕 *New Admission!*\n\n"
         f"👤 Name: {name}\n"
@@ -240,24 +233,20 @@ def handle_callback_query(call):
     first_name = call.from_user.first_name or "N/A"
     data = call.data
     
-    # Always answer callback query to remove button spinner
     try:
         bot.answer_callback_query(call.id)
     except Exception:
         pass
         
-    # Remove Inline Buttons after click
     try:
         bot.edit_message_reply_markup(chat_id=chat_id, message_id=call.message.message_id, reply_markup=None)
     except Exception:
         pass
         
-    # Check if already admitted
     if user_id in admitted:
         bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
         return
 
-    # Start Admission button click
     if data == "start_admission":
         conversations[user_id] = {"step": "awaiting_name", "chatId": chat_id}
         bot.send_message(chat_id, "📋 *Study Group Admission*\n\nWelcome! Admission process shuru karte hain.\n\n✏️ Apna *Full Name* likhkar bhejein:")
@@ -268,7 +257,6 @@ def handle_callback_query(call):
         bot.send_message(chat_id, "🤔 Pehle /admission command bhejein ya niche button click karke admission process shuru karein.", reply_markup=get_fallback_keyboard())
         return
 
-    # Step 2: Preparation Button Click
     if convo.get("step") == "awaiting_preparation":
         if data.startswith("prep_"):
             prep_choice = data.replace("prep_", "")
@@ -281,7 +269,6 @@ def handle_callback_query(call):
                 bot.send_message(chat_id, "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_state_keyboard())
         return
 
-    # Step 3: State Button Click
     if convo.get("step") == "awaiting_state":
         if data.startswith("state_"):
             state_choice = data.replace("state_", "")
@@ -308,7 +295,6 @@ def handle_text_messages(message):
     first_name = message.from_user.first_name or "N/A"
     text = message.text.strip()
     
-    # Check if already admitted
     if user_id in admitted:
         bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
         return
@@ -318,28 +304,24 @@ def handle_text_messages(message):
         bot.send_message(chat_id, "🤔 Pehle /admission command bhejein ya niche button click karke admission process shuru karein.", reply_markup=get_fallback_keyboard())
         return
 
-    # Step 1: Name Input
     if convo.get("step") == "awaiting_name":
         convo["name"] = text
         convo["step"] = "awaiting_preparation"
         bot.send_message(chat_id, "📚 Aap kis exam ki *preparation* kar rahe ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_prep_keyboard())
         return
 
-    # Step 2 Custom: Exam Name Input
     if convo.get("step") == "awaiting_preparation_custom":
         convo["preparation"] = text
         convo["step"] = "awaiting_state"
         bot.send_message(chat_id, "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_state_keyboard())
         return
 
-    # Step 3 Custom: State Name Input
     if convo.get("step") == "awaiting_state_custom":
         name = convo.get("name", "N/A")
         prep = convo.get("preparation", "N/A")
         complete_admission(chat_id, user_id, username, first_name, name, prep, text)
         return
 
-    # Fallback if text received during button step
     if convo.get("step") == "awaiting_preparation":
         bot.send_message(chat_id, "📚 Kripya niche diye gaye buttons me se select karein 👇", reply_markup=get_prep_keyboard())
         return
@@ -349,8 +331,23 @@ def handle_text_messages(message):
         return
 
 
-# --- MAIN EXECUTION LOOP ---
+# --- MAIN EXECUTION LOOP WITH CONFLICT PROTECTION ---
 
 if __name__ == "__main__":
     logging.info("Bot starting...")
-    bot.infinity_polling(skip_pending=True)
+    
+    # Delete old webhook (from n8n or previous runs) to allow clean long-polling
+    try:
+        bot.remove_webhook(drop_pending_updates=True)
+        time.sleep(1)
+        logging.info("Existing webhook removed successfully.")
+    except Exception as e:
+        logging.warning(f"Could not remove webhook: {e}")
+        
+    # Auto-restarting polling loop so Railway worker never crashes permanently
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            logging.error(f"Polling error encountered: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
