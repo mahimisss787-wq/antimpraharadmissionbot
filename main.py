@@ -23,27 +23,32 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Antimprahar Admission Bot (MongoDB) is alive and running 24/7!"
+    return "Antimprahar Admission Bot is alive and running 24/7!"
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# MongoDB Setup
+# MongoDB Setup with Fast 3-second Timeout
 mongo_client = None
 db = None
 admissions_col = None
 
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI)
+        mongo_client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=3000,
+            connectTimeoutMS=3000,
+            socketTimeoutMS=3000
+        )
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
-        logging.info("MongoDB connected successfully!")
+        logging.info("MongoDB initialized successfully!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
-    logging.warning("MONGO_URI not provided in Environment Variables. Data will be kept in memory.")
+    logging.warning("MONGO_URI not provided. Running with in-memory storage.")
 
 # Initialize Telegram Bot
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
@@ -51,7 +56,8 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 conversations = {}
 admitted = {}
 
-def save_to_mongodb(row_data):
+# Async Background MongoDB Save (Non-blocking)
+def _async_save_worker(row_data):
     if admissions_col is not None:
         try:
             admissions_col.update_one(
@@ -59,9 +65,12 @@ def save_to_mongodb(row_data):
                 {"$set": row_data},
                 upsert=True
             )
-            logging.info(f"Saved to MongoDB for User {row_data['userId']}")
+            logging.info(f"Background saved to MongoDB for User {row_data['userId']}")
         except Exception as e:
-            logging.error(f"Failed to save to MongoDB: {e}")
+            logging.error(f"Failed background save to MongoDB: {e}")
+
+def save_to_mongodb(row_data):
+    threading.Thread(target=_async_save_worker, args=(row_data,), daemon=True).start()
 
 def is_user_admitted(user_id):
     user_id_str = str(user_id)
@@ -74,8 +83,10 @@ def is_user_admitted(user_id):
                 admitted[user_id_str] = record
                 return True
         except Exception as e:
-            logging.error(f"Failed to query MongoDB: {e}")
+            logging.error(f"MongoDB check skipped or timed out: {e}")
     return False
+
+# --- KEYBOARD BUILDERS ---
 
 def get_welcome_keyboard():
     markup = InlineKeyboardMarkup()
@@ -130,14 +141,13 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
         
     save_to_mongodb(row_data)
     
-    invite_link = "#"
+    invite_link = "https://t.me"
     try:
         expire_time = int(time.time()) + 30
         res = bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_time)
         invite_link = res.invite_link
     except Exception as e:
         logging.error(f"Failed to create chat invite link: {e}")
-        invite_link = "https://t.me"
 
     success_text = (
         f"✅ *Admission Successful!*\n\n"
@@ -330,7 +340,7 @@ def handle_text_messages(message):
         return
 
 if __name__ == "__main__":
-    logging.info("Bot starting with MongoDB support...")
+    logging.info("Bot starting with Async MongoDB & Super-Fast Response...")
     
     threading.Thread(target=run_flask, daemon=True).start()
 
