@@ -30,7 +30,7 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# MongoDB Setup with SSL Certifi & 3-second Timeout
+# MongoDB Setup with SSL Certifi & Auto Database Creation
 mongo_client = None
 db = None
 admissions_col = None
@@ -40,13 +40,19 @@ if MONGO_URI:
         mongo_client = MongoClient(
             MONGO_URI,
             tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=3000,
-            connectTimeoutMS=3000,
-            socketTimeoutMS=3000
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000
         )
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
-        logging.info("MongoDB initialized successfully with SSL Certifi!")
+        
+        # Create initial collection entry so antimprahar_db appears immediately in Data Explorer
+        admissions_col.update_one(
+            {"userId": "system_init"},
+            {"$set": {"system": "initialized", "status": "active"}},
+            upsert=True
+        )
+        logging.info("MongoDB initialized and antimprahar_db database created successfully!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
@@ -58,21 +64,19 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 conversations = {}
 admitted = {}
 
-# Async Background MongoDB Save (Non-blocking)
-def _async_save_worker(row_data):
-    if admissions_col is not None:
-        try:
-            admissions_col.update_one(
-                {"userId": str(row_data["userId"])},
-                {"$set": row_data},
-                upsert=True
-            )
-            logging.info(f"Background saved to MongoDB for User {row_data['userId']}")
-        except Exception as e:
-            logging.error(f"Failed background save to MongoDB: {e}")
-
 def save_to_mongodb(row_data):
-    threading.Thread(target=_async_save_worker, args=(row_data,), daemon=True).start()
+    if admissions_col is not None:
+        def _worker():
+            try:
+                admissions_col.update_one(
+                    {"userId": str(row_data["userId"])},
+                    {"$set": row_data},
+                    upsert=True
+                )
+                logging.info(f"Saved to MongoDB for User {row_data['userId']}")
+            except Exception as e:
+                logging.error(f"Failed save to MongoDB: {e}")
+        threading.Thread(target=_worker, daemon=True).start()
 
 def is_user_admitted(user_id):
     user_id_str = str(user_id)
@@ -81,7 +85,7 @@ def is_user_admitted(user_id):
     if admissions_col is not None:
         try:
             record = admissions_col.find_one({"userId": user_id_str})
-            if record:
+            if record and record.get("name"):
                 admitted[user_id_str] = record
                 return True
         except Exception as e:
@@ -342,7 +346,7 @@ def handle_text_messages(message):
         return
 
 if __name__ == "__main__":
-    logging.info("Bot starting with Async MongoDB & Super-Fast Response...")
+    logging.info("Bot starting with Auto-Init MongoDB...")
     
     threading.Thread(target=run_flask, daemon=True).start()
 
