@@ -8,6 +8,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import threading
 from flask import Flask
 from pymongo import MongoClient
+import certifi
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -29,7 +30,7 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# MongoDB Setup with Fast 3-second Timeout
+# MongoDB Setup with SSL Certifi & 3-second Timeout
 mongo_client = None
 db = None
 admissions_col = None
@@ -38,13 +39,14 @@ if MONGO_URI:
     try:
         mongo_client = MongoClient(
             MONGO_URI,
+            tlsCAFile=certifi.where(),
             serverSelectionTimeoutMS=3000,
             connectTimeoutMS=3000,
             socketTimeoutMS=3000
         )
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
-        logging.info("MongoDB initialized successfully!")
+        logging.info("MongoDB initialized successfully with SSL Certifi!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
@@ -83,7 +85,7 @@ def is_user_admitted(user_id):
                 admitted[user_id_str] = record
                 return True
         except Exception as e:
-            logging.error(f"MongoDB check skipped or timed out: {e}")
+            logging.error(f"MongoDB check skipped: {e}")
     return False
 
 # --- KEYBOARD BUILDERS ---
