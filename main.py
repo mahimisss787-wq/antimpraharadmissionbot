@@ -46,13 +46,13 @@ if MONGO_URI:
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
         
-        # Create initial collection entry so antimprahar_db appears immediately in Data Explorer
+        # System initialization check
         admissions_col.update_one(
             {"userId": "system_init"},
             {"$set": {"system": "initialized", "status": "active"}},
             upsert=True
         )
-        logging.info("MongoDB initialized and antimprahar_db database created successfully!")
+        logging.info("MongoDB initialized and connected successfully!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
@@ -63,6 +63,25 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 conversations = {}
 admitted = {}
+
+def track_user_activity(user_id, username="N/A", first_name="N/A"):
+    user_id_str = str(user_id)
+    if admissions_col is not None and user_id_str != "system_init":
+        def _worker():
+            try:
+                admissions_col.update_one(
+                    {"userId": user_id_str},
+                    {"$setOnInsert": {
+                        "userId": user_id_str,
+                        "username": username,
+                        "firstName": first_name,
+                        "registeredAt": datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%d/%m/%Y, %I:%M:%S %p")
+                    }},
+                    upsert=True
+                )
+            except Exception as e:
+                logging.error(f"Failed to track user activity: {e}")
+        threading.Thread(target=_worker, daemon=True).start()
 
 def save_to_mongodb(row_data):
     if admissions_col is not None:
@@ -180,6 +199,85 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
     except Exception as e:
         logging.error(f"Failed to notify Admin: {e}")
 
+# --- BROADCAST COMMAND (ADMIN ONLY) ---
+
+@bot.message_handler(commands=['broadcast'])
+def handle_broadcast(message):
+    user_id = str(message.from_user.id)
+    if user_id != str(ADMIN_ID):
+        bot.reply_to(message, "⛔ Aapke paas broadcast bhejne ki permission nahi hai.")
+        return
+
+    has_reply = message.reply_to_message is not None
+    command_text = message.text.split(maxsplit=1)
+    text_to_send = command_text[1].strip() if len(command_text) > 1 else ""
+
+    if not has_reply and not text_to_send:
+        guide_msg = (
+            "📢 *Broadcast Command Usage Guide*\n\n"
+            "**Option 1 (Text Broadcast):**\n"
+            "`/broadcast Aapka Message Yahan Likhien`\n\n"
+            "**Option 2 (Media Broadcast - Photo/Video/File):**\n"
+            "Kisi bhi photo, video ya post ko bhej kar uspar **Reply** karke `/broadcast` likhein."
+        )
+        bot.reply_to(message, guide_msg)
+        return
+
+    target_user_ids = set()
+    if admissions_col is not None:
+        try:
+            records = admissions_col.find({}, {"userId": 1})
+            for r in records:
+                u = r.get("userId")
+                if u and u != "system_init":
+                    target_user_ids.add(str(u))
+        except Exception as e:
+            logging.error(f"Failed to fetch users for broadcast: {e}")
+
+    target_user_ids.update(admitted.keys())
+    target_user_ids.update(conversations.keys())
+
+    if not target_user_ids:
+        bot.reply_to(message, "⚠️ Koi target users nahi mile broadcast ke liye.")
+        return
+
+    status_msg = bot.reply_to(message, f"⏳ *Broadcast processing...*\n\nTotal Users: `{len(target_user_ids)}` users ko message bheja ja raha hai...")
+
+    def run_broadcast_task():
+        success_count = 0
+        failed_count = 0
+
+        for target_id in target_user_ids:
+            try:
+                if has_reply:
+                    bot.copy_message(
+                        chat_id=target_id,
+                        from_chat_id=message.chat.id,
+                        message_id=message.reply_to_message.message_id
+                    )
+                else:
+                    bot.send_message(chat_id=target_id, text=text_to_send, parse_mode="Markdown")
+                success_count += 1
+                time.sleep(0.05)
+            except Exception as e:
+                failed_count += 1
+                logging.warning(f"Could not send broadcast to user {target_id}: {e}")
+
+        report_text = (
+            f"📢 *Broadcast Summary Report*\n\n"
+            f"👥 Total Target Users: `{len(target_user_ids)}` \n"
+            f"✅ Successfully Delivered: `{success_count}`\n"
+            f"🚫 Failed / Blocked: `{failed_count}`"
+        )
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=status_msg.message_id, text=report_text, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(message.chat.id, report_text, parse_mode="Markdown")
+
+    threading.Thread(target=run_broadcast_task, daemon=True).start()
+
+# --- COMMAND HANDLERS ---
+
 @bot.message_handler(commands=['resetall'])
 def handle_reset_all(message):
     user_id = str(message.from_user.id)
@@ -189,7 +287,7 @@ def handle_reset_all(message):
     conversations.clear()
     if admissions_col is not None:
         try:
-            admissions_col.delete_many({})
+            admissions_col.delete_many({"userId": {"$ne": "system_init"}})
         except Exception as e:
             logging.error(f"Failed to reset MongoDB: {e}")
     bot.reply_to(message, "🧹 *All Data Cleared!*\n\nSabhi users ka admission record delete kar diya gaya hai.")
@@ -225,6 +323,8 @@ def handle_start(message):
     user_id = str(message.from_user.id)
     conversations.pop(user_id, None)
     
+    track_user_activity(user_id, message.from_user.username, message.from_user.first_name)
+
     welcome_text = (
         "👋 Welcome to *Study Group Admission Bot*!\n\n"
         "Admission process shuru karne ke liye niche button par click karein 👇"
@@ -236,6 +336,8 @@ def handle_admission_command(message):
     user_id = str(message.from_user.id)
     chat_id = str(message.chat.id)
     
+    track_user_activity(user_id, message.from_user.username, message.from_user.first_name)
+
     if is_user_admitted(user_id):
         bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
         return
@@ -251,6 +353,8 @@ def handle_callback_query(call):
     first_name = call.from_user.first_name or "N/A"
     data = call.data
     
+    track_user_activity(user_id, call.from_user.username, call.from_user.first_name)
+
     try:
         bot.answer_callback_query(call.id)
     except Exception:
@@ -310,6 +414,8 @@ def handle_text_messages(message):
     first_name = message.from_user.first_name or "N/A"
     text = message.text.strip()
     
+    track_user_activity(user_id, message.from_user.username, message.from_user.first_name)
+
     if is_user_admitted(user_id):
         bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
         return
@@ -346,7 +452,7 @@ def handle_text_messages(message):
         return
 
 if __name__ == "__main__":
-    logging.info("Bot starting with Auto-Init MongoDB...")
+    logging.info("Bot starting with Broadcast feature...")
     
     threading.Thread(target=run_flask, daemon=True).start()
 
