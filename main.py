@@ -6,6 +6,8 @@ from datetime import datetime
 import pytz
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import threading
+from flask import Flask
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -15,6 +17,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8944237255:AAE3SqXZyukH-HpazVhkMJryIFD2BJK6z
 ADMIN_ID = os.getenv("ADMIN_ID", "6416451659")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "-1003493006883")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1zvgEFhy29CRqliTra1kPdviEVP503hjLAxmy8axhys0")
+
+# Setup Flask Server for Render Keep-Alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Antimprahar Admission Bot is alive and running 24/7!"
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 # Google Sheets Setup
 gspread_client = None
@@ -336,6 +349,9 @@ def handle_text_messages(message):
 if __name__ == "__main__":
     logging.info("Bot starting...")
     
+    # Start Flask Web Server in background thread for Render & UptimeRobot keep-alive
+    threading.Thread(target=run_flask, daemon=True).start()
+
     # Delete old webhook (from n8n or previous runs) to allow clean long-polling
     try:
         bot.remove_webhook(drop_pending_updates=True)
@@ -344,7 +360,7 @@ if __name__ == "__main__":
     except Exception as e:
         logging.warning(f"Could not remove webhook: {e}")
         
-    # Auto-restarting polling loop so Railway worker never crashes permanently
+    # Auto-restarting polling loop
     while True:
         try:
             bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
