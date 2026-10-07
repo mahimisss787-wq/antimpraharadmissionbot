@@ -30,7 +30,7 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# MongoDB Setup with SSL Certifi & Auto Database Creation
+# MongoDB Setup
 mongo_client = None
 db = None
 admissions_col = None
@@ -46,13 +46,12 @@ if MONGO_URI:
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
         
-        # System initialization check
         admissions_col.update_one(
             {"userId": "system_init"},
             {"$set": {"system": "initialized", "status": "active"}},
             upsert=True
         )
-        logging.info("MongoDB initialized and connected successfully!")
+        logging.info("MongoDB initialized successfully!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
@@ -146,7 +145,13 @@ def get_fallback_keyboard():
     markup.add(InlineKeyboardButton("📝 Start Admission", callback_data="start_admission"))
     return markup
 
-def complete_admission(chat_id, user_id, username, first_name, name, preparation, state):
+def safe_delete_message(chat_id, message_id):
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+def complete_admission_in_place(chat_id, user_id, username, first_name, name, preparation, state, target_msg_id=None):
     tz = pytz.timezone("Asia/Kolkata")
     formatted_date = datetime.now(tz).strftime("%d/%m/%Y, %I:%M:%S %p")
     
@@ -176,14 +181,21 @@ def complete_admission(chat_id, user_id, username, first_name, name, preparation
 
     success_text = (
         f"✅ *Admission Successful!*\n\n"
-        f"🎓 Name: {name}\n"
-        f"📚 Preparation: {preparation}\n"
-        f"📍 State: {state}\n\n"
+        f"🎓 *Name:* {name}\n"
+        f"📚 *Preparation:* {preparation}\n"
+        f"📍 *State:* {state}\n\n"
         f"⚡ Niche *Join Study Group* button par click karke group join karein. Link sirf *30 second* valid hai!"
     )
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🚀 Join Study Group Now", url=invite_link))
-    bot.send_message(chat_id, success_text, reply_markup=markup)
+    
+    if target_msg_id:
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=success_text, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(chat_id, success_text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, success_text, reply_markup=markup, parse_mode="Markdown")
     
     admin_text = (
         f"🆕 *New Admission!*\n\n"
@@ -342,8 +354,8 @@ def handle_admission_command(message):
         bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
         return
         
-    conversations[user_id] = {"step": "awaiting_name", "chatId": chat_id}
-    bot.send_message(chat_id, "📋 *Study Group Admission*\n\nWelcome! Admission process shuru karte hain.\n\n✏️ Apna *Full Name* likhkar bhejein:")
+    prompt_msg = bot.send_message(chat_id, "📋 *Study Group Admission*\n\nWelcome! Admission process shuru karte hain.\n\n✏️ Apna *Full Name* likhkar bhejein:")
+    conversations[user_id] = {"step": "awaiting_name", "chatId": chat_id, "msgId": prompt_msg.message_id}
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback_query(call):
@@ -359,24 +371,32 @@ def handle_callback_query(call):
         bot.answer_callback_query(call.id)
     except Exception:
         pass
-        
-    try:
-        bot.edit_message_reply_markup(chat_id=chat_id, message_id=call.message.message_id, reply_markup=None)
-    except Exception:
-        pass
-        
+
     if is_user_admitted(user_id):
-        bot.send_message(chat_id, "⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text="⚠️ Aap pehle se admission le chuke ho!\n\nDobara admission nahi le sakte. Agar koi issue hai toh admin se contact karein.")
+        except Exception:
+            pass
         return
 
     if data == "start_admission":
-        conversations[user_id] = {"step": "awaiting_name", "chatId": chat_id}
-        bot.send_message(chat_id, "📋 *Study Group Admission*\n\nWelcome! Admission process shuru karte hain.\n\n✏️ Apna *Full Name* likhkar bhejein:")
+        prompt_text = "📋 *Study Group Admission*\n\nWelcome! Admission process shuru karte hain.\n\n✏️ Apna *Full Name* likhkar bhejein:"
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=prompt_text, parse_mode="Markdown")
+            msg_id = call.message.message_id
+        except Exception:
+            m = bot.send_message(chat_id, prompt_text, parse_mode="Markdown")
+            msg_id = m.message_id
+            
+        conversations[user_id] = {"step": "awaiting_name", "chatId": chat_id, "msgId": msg_id}
         return
 
     convo = conversations.get(user_id)
     if not convo:
-        bot.send_message(chat_id, "🤔 Pehle /admission command bhejein ya niche button click karke admission process shuru karein.", reply_markup=get_fallback_keyboard())
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text="🤔 Pehle /admission command bhejein ya niche button click karke admission process shuru karein.", reply_markup=get_fallback_keyboard())
+        except Exception:
+            pass
         return
 
     if convo.get("step") == "awaiting_preparation":
@@ -384,11 +404,19 @@ def handle_callback_query(call):
             prep_choice = data.replace("prep_", "")
             if prep_choice == "OTHER":
                 convo["step"] = "awaiting_preparation_custom"
-                bot.send_message(chat_id, "✍️ Apne exam ka naam type karke bhejein:\n\n(Example: Banking, Board Exams, Defence, etc.)")
+                prompt_text = "✍️ Apne exam ka naam type karke bhejein:\n\n(Example: Banking, Board Exams, Defence, etc.)"
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=prompt_text)
+                except Exception:
+                    pass
             else:
                 convo["preparation"] = prep_choice
                 convo["step"] = "awaiting_state"
-                bot.send_message(chat_id, "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_state_keyboard())
+                prompt_text = "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)"
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=prompt_text, reply_markup=get_state_keyboard(), parse_mode="Markdown")
+                except Exception:
+                    pass
         return
 
     if convo.get("step") == "awaiting_state":
@@ -396,11 +424,15 @@ def handle_callback_query(call):
             state_choice = data.replace("state_", "")
             if state_choice == "OTHER":
                 convo["step"] = "awaiting_state_custom"
-                bot.send_message(chat_id, "🌐 Apne *State* ka naam type karke bhejein:")
+                prompt_text = "🌐 Apne *State* ka naam type karke bhejein:"
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=prompt_text)
+                except Exception:
+                    pass
             else:
                 name = convo.get("name", "N/A")
                 prep = convo.get("preparation", "N/A")
-                complete_admission(chat_id, user_id, username, first_name, name, prep, state_choice)
+                complete_admission_in_place(chat_id, user_id, username, first_name, name, prep, state_choice, target_msg_id=call.message.message_id)
         return
 
 @bot.message_handler(func=lambda msg: True, content_types=['text'])
@@ -425,34 +457,74 @@ def handle_text_messages(message):
         bot.send_message(chat_id, "🤔 Pehle /admission command bhejein ya niche button click karke admission process shuru karein.", reply_markup=get_fallback_keyboard())
         return
 
+    target_msg_id = convo.get("msgId")
+
     if convo.get("step") == "awaiting_name":
         convo["name"] = text
         convo["step"] = "awaiting_preparation"
-        bot.send_message(chat_id, "📚 Aap kis exam ki *preparation* kar rahe ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_prep_keyboard())
+        
+        safe_delete_message(chat_id, message.message_id)
+        
+        prompt_text = "📚 Aap kis exam ki *preparation* kar rahe ho?\n\n(Niche diye gaye buttons me se select karein 👇)"
+        if target_msg_id:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=prompt_text, reply_markup=get_prep_keyboard(), parse_mode="Markdown")
+            except Exception:
+                m = bot.send_message(chat_id, prompt_text, reply_markup=get_prep_keyboard(), parse_mode="Markdown")
+                convo["msgId"] = m.message_id
+        else:
+            m = bot.send_message(chat_id, prompt_text, reply_markup=get_prep_keyboard(), parse_mode="Markdown")
+            convo["msgId"] = m.message_id
         return
 
     if convo.get("step") == "awaiting_preparation_custom":
         convo["preparation"] = text
         convo["step"] = "awaiting_state"
-        bot.send_message(chat_id, "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)", reply_markup=get_state_keyboard())
+        
+        safe_delete_message(chat_id, message.message_id)
+        
+        prompt_text = "📍 Aap kaunse *State* se ho?\n\n(Niche diye gaye buttons me se select karein 👇)"
+        if target_msg_id:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=prompt_text, reply_markup=get_state_keyboard(), parse_mode="Markdown")
+            except Exception:
+                m = bot.send_message(chat_id, prompt_text, reply_markup=get_state_keyboard(), parse_mode="Markdown")
+                convo["msgId"] = m.message_id
+        else:
+            m = bot.send_message(chat_id, prompt_text, reply_markup=get_state_keyboard(), parse_mode="Markdown")
+            convo["msgId"] = m.message_id
         return
 
     if convo.get("step") == "awaiting_state_custom":
+        safe_delete_message(chat_id, message.message_id)
+        
         name = convo.get("name", "N/A")
         prep = convo.get("preparation", "N/A")
-        complete_admission(chat_id, user_id, username, first_name, name, prep, text)
+        complete_admission_in_place(chat_id, user_id, username, first_name, name, prep, text, target_msg_id=target_msg_id)
         return
 
     if convo.get("step") == "awaiting_preparation":
-        bot.send_message(chat_id, "📚 Kripya niche diye gaye buttons me se select karein 👇", reply_markup=get_prep_keyboard())
+        safe_delete_message(chat_id, message.message_id)
+        prompt_text = "📚 Kripya niche diye gaye buttons me se select karein 👇"
+        if target_msg_id:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=prompt_text, reply_markup=get_prep_keyboard())
+            except Exception:
+                pass
         return
 
     if convo.get("step") == "awaiting_state":
-        bot.send_message(chat_id, "📍 Kripya niche diye gaye buttons me se select karein 👇", reply_markup=get_state_keyboard())
+        safe_delete_message(chat_id, message.message_id)
+        prompt_text = "📍 Kripya niche diye gaye buttons me se select karein 👇"
+        if target_msg_id:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=prompt_text, reply_markup=get_state_keyboard())
+            except Exception:
+                pass
         return
 
 if __name__ == "__main__":
-    logging.info("Bot starting with Broadcast feature...")
+    logging.info("Bot starting with Single Clean Message UI...")
     
     threading.Thread(target=run_flask, daemon=True).start()
 
