@@ -30,6 +30,31 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+# PREVIOUS MEMBERS DATA FOR AUTO-IMPORT TO MONGODB
+PREVIOUS_STUDENTS = [
+    {"userId": "8914751355", "name": "Mohit", "username": "@niistharajput", "preparation": "BPSC", "state": "MP"},
+    {"userId": "8727877982", "name": "Shreya Singh", "username": "N/A", "preparation": "SSC", "state": "UP"},
+    {"userId": "8048730537", "name": "Shivam", "username": "N/A", "preparation": "SSC", "state": "UP"},
+    {"userId": "1216936280", "name": "Ajay shukla", "username": "@Wowhum", "preparation": "UPSC", "state": "UP"},
+    {"userId": "8581382271", "name": "Nikku gupta", "username": "@Gupat_91", "preparation": "UPSC", "state": "Bihar"},
+    {"userId": "6416451659", "name": "Mahi", "username": "N/A", "preparation": "UPSC", "state": "Bihar"},
+    {"userId": "8560759903", "name": "Ak", "username": "N/A", "preparation": "BPSC", "state": "Bihar"},
+    {"userId": "8691169222", "name": "Abhishek Kumar", "username": "N/A", "preparation": "UPSC", "state": "Bihar"},
+    {"userId": "8615194107", "name": "Pritam Singh rajput", "username": "N/A", "preparation": "All competitive exams", "state": "Bihar"},
+    {"userId": "6380680769", "name": "Riya Raj", "username": "N/A", "preparation": "Up police constable", "state": "UP"},
+    {"userId": "7118259188", "name": "Babu rao ganpat Raao apte", "username": "@amitjha469", "preparation": "UPSC", "state": "WB"},
+    {"userId": "8120287961", "name": "N Gupta", "username": "N/A", "preparation": "BPSC", "state": "Bihar"},
+    {"userId": "7874637513", "name": "Rocky", "username": "N/A", "preparation": "SSC", "state": "Bihar"},
+    {"userId": "8832346172", "name": "Radhe", "username": "N/A", "preparation": "Other", "state": "Bihar"},
+    {"userId": "8521478087", "name": "Priyanka", "username": "N/A", "preparation": "SSC", "state": "Rajasthan"},
+    {"userId": "1549916238", "name": "Jaya", "username": "N/A", "preparation": "BSSC", "state": "Bihar"},
+    {"userId": "6017441443", "name": "Ssc", "username": "N/A", "preparation": "SSC", "state": "Bihar"},
+    {"userId": "1488543107", "name": "Sharma ji", "username": "@Sharmaji7979", "preparation": "BPSC", "state": "Bihar"},
+    {"userId": "7383971004", "name": "Idiot", "username": "N/A", "preparation": "Bihar Librarian", "state": "Bihar"},
+    {"userId": "8170142646", "name": "Paridhi agrawal", "username": "N/A", "preparation": "BPSC", "state": "Bihar"},
+    {"userId": "8466013841", "name": "Sonali kumari", "username": "N/A", "preparation": "Railway", "state": "Bihar"}
+]
+
 # MongoDB Setup
 mongo_client = None
 db = None
@@ -46,12 +71,29 @@ if MONGO_URI:
         db = mongo_client["antimprahar_db"]
         admissions_col = db["admissions"]
         
+        # System initialization check
         admissions_col.update_one(
             {"userId": "system_init"},
             {"$set": {"system": "initialized", "status": "active"}},
             upsert=True
         )
-        logging.info("MongoDB initialized successfully!")
+
+        # Seed all 21 previous members into MongoDB automatically
+        for s in PREVIOUS_STUDENTS:
+            admissions_col.update_one(
+                {"userId": s["userId"]},
+                {"$setOnInsert": {
+                    "userId": s["userId"],
+                    "name": s["name"],
+                    "username": s["username"],
+                    "preparation": s["preparation"],
+                    "state": s["state"],
+                    "date": "Imported Previous Member"
+                }},
+                upsert=True
+            )
+
+        logging.info("MongoDB initialized and all 21 previous members imported successfully!")
     except Exception as e:
         logging.error(f"MongoDB connection failed: {e}")
 else:
@@ -524,7 +566,7 @@ def handle_text_messages(message):
         return
 
 if __name__ == "__main__":
-    logging.info("Bot starting with Single Clean Message UI...")
+    logging.info("Bot starting with Auto-Imported 21 Previous Members...")
     
     threading.Thread(target=run_flask, daemon=True).start()
 
