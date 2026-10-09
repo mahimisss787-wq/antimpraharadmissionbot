@@ -382,22 +382,32 @@ def handle_reset_user(message):
     parts = message.text.split(maxsplit=1)
     target_id = parts[1].strip() if len(parts) > 1 else ""
     
-    if not target_id or target_id.lower() in ['me', 'self']:
-        target_id = user_id
+    # Check if replying to an approval card or user message
+    if not target_id and message.reply_to_message:
+        reply_text = message.reply_to_message.text or ""
+        # Extract User ID from card if present
+        import re
+        match = re.search(r"User ID:\s*`?(\d+)`?", reply_text)
+        if match:
+            target_id = match.group(1)
+        elif message.reply_to_message.forward_from:
+            target_id = str(message.reply_to_message.forward_from.id)
+            
+    if not target_id:
+        bot.reply_to(message, "⚠️ *Usage:* `/reset <User_ID>` ya kisi user card/message par **Reply** karke `/reset` likhein.")
+        return
         
-    was_admitted = is_user_admitted(target_id)
+    admitted.pop(target_id, None)
+    conversations.pop(target_id, None)
+    pending_approvals.pop(target_id, None)
     
-    if was_admitted:
-        admitted.pop(target_id, None)
-        conversations.pop(target_id, None)
-        if admissions_col is not None:
-            try:
-                admissions_col.delete_one({"userId": target_id})
-            except Exception as e:
-                logging.error(f"Failed to delete user from MongoDB: {e}")
-        bot.reply_to(message, f"✅ *Reset Successful!*\n\nUser ID: `{target_id}` ka admission record remove kar diya gaya hai.")
-    else:
-        bot.reply_to(message, f"⚠️ *User Not Found!*\n\nUser ID: `{target_id}` ka koi admission record nahi mila.")
+    if admissions_col is not None:
+        try:
+            admissions_col.delete_one({"userId": target_id})
+        except Exception as e:
+            logging.error(f"Failed to delete user from MongoDB: {e}")
+            
+    bot.reply_to(message, f"✅ *Reset Successful!*\n\nUser ID: `{target_id}` ka saara admission record delete kar diya gaya hai. Ab yeh user dobara fresh admission le sakta hai.")
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
