@@ -104,6 +104,8 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 conversations = {}
 admitted = {}
+pending_approvals = {}  # Stores pending admission data until admin approves/rejects
+broadcast_store = {}    # Stores broadcast message IDs for deletion
 
 def track_user_activity(user_id, username="N/A", first_name="N/A"):
     user_id_str = str(user_id)
@@ -145,10 +147,12 @@ def is_user_admitted(user_id):
     if admissions_col is not None:
         try:
             record = admissions_col.find_one({"userId": user_id_str})
-            # Only count as admitted if record has a name AND was NOT just an imported member
+            # Only count as admitted if: has name, NOT imported, AND status is approved (or old records without status)
             if record and record.get("name") and record.get("date") != "Imported Previous Member":
-                admitted[user_id_str] = record
-                return True
+                status = record.get("status", "approved")  # Old records without status are treated as approved
+                if status == "approved":
+                    admitted[user_id_str] = record
+                    return True
         except Exception as e:
             logging.error(f"MongoDB check skipped: {e}")
     return False
@@ -205,54 +209,65 @@ def complete_admission_in_place(chat_id, user_id, username, first_name, name, pr
         "username": username,
         "firstName": first_name,
         "userId": str(user_id),
-        "date": formatted_date
+        "date": formatted_date,
+        "status": "pending"  # Pending until admin approves
     }
     
-    admitted[str(user_id)] = row_data
     if str(user_id) in conversations:
         del conversations[str(user_id)]
         
     save_to_mongodb(row_data)
     
-    invite_link = "https://t.me"
-    try:
-        expire_time = int(time.time()) + 30
-        res = bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_time)
-        invite_link = res.invite_link
-    except Exception as e:
-        logging.error(f"Failed to create chat invite link: {e}")
-
-    success_text = (
-        f"✅ *Admission Successful!*\n\n"
+    # Store pending approval data for later use
+    pending_approvals[str(user_id)] = {
+        "chatId": chat_id,
+        "name": name,
+        "preparation": preparation,
+        "state": state,
+        "username": username,
+        "firstName": first_name,
+        "date": formatted_date,
+        "targetMsgId": target_msg_id
+    }
+    
+    # Show user a PENDING message (no invite link yet)
+    pending_text = (
+        f"📋 *Thank You for Registering!*\n\n"
         f"🎓 *Name:* {name}\n"
         f"📚 *Preparation:* {preparation}\n"
         f"📍 *State:* {state}\n\n"
-        f"⚡ Niche *Join Study Group* button par click karke group join karein. Link sirf *30 second* valid hai!"
+        f"✅ Aapke details successfully submit ho gaye hain!\n"
+        f"🔍 Humari team aapki details verify kar rahi hai. Complete hote hi aapko group link mil jayega."
     )
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🚀 Join Study Group Now", url=invite_link))
     
     if target_msg_id:
         try:
-            bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=success_text, reply_markup=markup, parse_mode="Markdown")
+            bot.edit_message_text(chat_id=chat_id, message_id=target_msg_id, text=pending_text, parse_mode="Markdown")
         except Exception:
-            bot.send_message(chat_id, success_text, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(chat_id, pending_text, parse_mode="Markdown")
     else:
-        bot.send_message(chat_id, success_text, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(chat_id, pending_text, parse_mode="Markdown")
     
+    # Send ADMIN an approval request with Accept/Reject buttons
     admin_text = (
-        f"🆕 *New Admission!*\n\n"
+        f"🆕 *New Admission Request!*\n\n"
         f"👤 Name: {name}\n"
         f"📚 Preparation: {preparation}\n"
         f"📍 State: {state}\n"
         f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user_id}\n"
-        f"📅 Date: {formatted_date}"
+        f"🆔 User ID: `{user_id}`\n"
+        f"📅 Date: {formatted_date}\n\n"
+        f"⬇️ *Accept ya Reject karein:*"
+    )
+    admin_markup = InlineKeyboardMarkup()
+    admin_markup.add(
+        InlineKeyboardButton("✅ Accept", callback_data=f"approve_{user_id}"),
+        InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
     )
     try:
-        bot.send_message(ADMIN_ID, admin_text)
+        bot.send_message(ADMIN_ID, admin_text, reply_markup=admin_markup, parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"Failed to notify Admin: {e}")
+        logging.error(f"Failed to send approval request to Admin: {e}")
 
 # --- BROADCAST COMMAND (ADMIN ONLY) ---
 
@@ -298,6 +313,9 @@ def handle_broadcast(message):
 
     status_msg = bot.reply_to(message, f"⏳ *Broadcast processing...*\n\nTotal Users: `{len(target_user_ids)}` users ko message bheja ja raha hai...")
 
+    bcast_id = str(int(time.time()))
+    broadcast_store[bcast_id] = []
+
     def run_broadcast_task():
         success_count = 0
         failed_count = 0
@@ -305,14 +323,18 @@ def handle_broadcast(message):
         for target_id in target_user_ids:
             try:
                 if has_reply:
-                    bot.copy_message(
+                    sent = bot.copy_message(
                         chat_id=target_id,
                         from_chat_id=message.chat.id,
                         message_id=message.reply_to_message.message_id
                     )
+                    msg_id = sent.message_id
                 else:
-                    bot.send_message(chat_id=target_id, text=text_to_send, parse_mode="Markdown")
+                    sent = bot.send_message(chat_id=target_id, text=text_to_send, parse_mode="Markdown")
+                    msg_id = sent.message_id
+                    
                 success_count += 1
+                broadcast_store[bcast_id].append((target_id, msg_id))
                 time.sleep(0.05)
             except Exception as e:
                 failed_count += 1
@@ -322,12 +344,16 @@ def handle_broadcast(message):
             f"📢 *Broadcast Summary Report*\n\n"
             f"👥 Total Target Users: `{len(target_user_ids)}` \n"
             f"✅ Successfully Delivered: `{success_count}`\n"
-            f"🚫 Failed / Blocked: `{failed_count}`"
+            f"🚫 Failed / Blocked: `{failed_count}`\n\n"
+            f"💡 *Is broadcast ko sabhi members ke inbox se delete karne ke liye niche button dabayein:*"
         )
+        report_markup = InlineKeyboardMarkup()
+        report_markup.add(InlineKeyboardButton("🗑️ Delete This Broadcast", callback_data=f"delbcast_{bcast_id}"))
+        
         try:
-            bot.edit_message_text(chat_id=message.chat.id, message_id=status_msg.message_id, text=report_text, parse_mode="Markdown")
+            bot.edit_message_text(chat_id=message.chat.id, message_id=status_msg.message_id, text=report_text, reply_markup=report_markup, parse_mode="Markdown")
         except Exception:
-            bot.send_message(message.chat.id, report_text, parse_mode="Markdown")
+            bot.send_message(message.chat.id, report_text, reply_markup=report_markup, parse_mode="Markdown")
 
     threading.Thread(target=run_broadcast_task, daemon=True).start()
 
@@ -414,6 +440,151 @@ def handle_callback_query(call):
         bot.answer_callback_query(call.id)
     except Exception:
         pass
+
+    # --- ADMIN APPROVAL / REJECTION HANDLING ---
+    if data.startswith("approve_") and user_id == str(ADMIN_ID):
+        target_user_id = data.replace("approve_", "")
+        pending = pending_approvals.get(target_user_id)
+        
+        if not pending:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=call.message.text + "\n\n⚠️ *Already processed or expired.*", parse_mode="Markdown")
+            except Exception:
+                pass
+            return
+        
+        # Mark as admitted
+        admitted[target_user_id] = pending
+        
+        # Update MongoDB status to approved
+        if admissions_col is not None:
+            def _approve_worker():
+                try:
+                    admissions_col.update_one(
+                        {"userId": target_user_id},
+                        {"$set": {"status": "approved"}}
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to update approval status: {e}")
+            threading.Thread(target=_approve_worker, daemon=True).start()
+        
+        # Generate invite link for the user
+        invite_link = "https://t.me"
+        try:
+            expire_time = int(time.time()) + 120  # 2 minute valid link
+            res = bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_time)
+            invite_link = res.invite_link
+        except Exception as e:
+            logging.error(f"Failed to create invite link: {e}")
+        
+        # Send SUCCESS message to user with invite link
+        user_chat_id = pending["chatId"]
+        success_text = (
+            f"🥳 *Congratulations! Admission Confirmed*\n\n"
+            f"🎓 *Name:* {pending['name']}\n"
+            f"📚 *Preparation:* {pending['preparation']}\n"
+            f"📍 *State:* {pending['state']}\n\n"
+            f"🌟 Aapka *Antimprahar Study Group* mein welcome hai! Aapki seat confirm kar li gayi hai.\n\n"
+            f"🚀 Niche button par click karke group mein add ho jayein (Link valid for 2 minutes)."
+        )
+        user_markup = InlineKeyboardMarkup()
+        user_markup.add(InlineKeyboardButton("🚀 Join Study Group Now", url=invite_link))
+        
+        try:
+            bot.send_message(user_chat_id, success_text, reply_markup=user_markup, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Failed to send approval to user {target_user_id}: {e}")
+        
+        # Update admin message to show APPROVED
+        try:
+            updated_admin_text = call.message.text + f"\n\n✅ *APPROVED* ✅"
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=updated_admin_text, parse_mode="Markdown")
+        except Exception:
+            pass
+        
+        # Remove from pending
+        pending_approvals.pop(target_user_id, None)
+        return
+    
+    if data.startswith("reject_") and user_id == str(ADMIN_ID):
+        target_user_id = data.replace("reject_", "")
+        pending = pending_approvals.get(target_user_id)
+        
+        if not pending:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=call.message.text + "\n\n⚠️ *Already processed or expired.*", parse_mode="Markdown")
+            except Exception:
+                pass
+            return
+        
+        # Update MongoDB status to rejected
+        if admissions_col is not None:
+            def _reject_worker():
+                try:
+                    admissions_col.update_one(
+                        {"userId": target_user_id},
+                        {"$set": {"status": "rejected"}}
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to update rejection status: {e}")
+            threading.Thread(target=_reject_worker, daemon=True).start()
+        
+        # Send REJECTION message to user
+        user_chat_id = pending["chatId"]
+        reject_text = (
+            f"❌ *Admission Status Update*\n\n"
+            f"Aapke admission application ka review kiya gaya hai. Filhal aapki request approve nahi ho saki hai.\n\n"
+            f"Agar aapko is baare mein koi jankari chahiye ya aap dobara apply karna chahte hain, toh kripya support / admin se sampark karein.\n\n"
+            f"Dhanyawad."
+        )
+        try:
+            bot.send_message(user_chat_id, reject_text, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Failed to send rejection to user {target_user_id}: {e}")
+        
+        # Update admin message to show REJECTED
+        try:
+            updated_admin_text = call.message.text + f"\n\n❌ *REJECTED* ❌"
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=updated_admin_text, parse_mode="Markdown")
+        except Exception:
+            pass
+        
+        # Remove from pending
+        pending_approvals.pop(target_user_id, None)
+        return
+
+    # --- DELETE BROADCAST HANDLING ---
+    if data.startswith("delbcast_") and user_id == str(ADMIN_ID):
+        bcast_id = data.replace("delbcast_", "")
+        records = broadcast_store.get(bcast_id, [])
+        
+        if not records:
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=call.message.text + "\n\n⚠️ *Yeh broadcast pehle hi delete ho chuka hai ya record nahi mila.*", parse_mode="Markdown")
+            except Exception:
+                pass
+            return
+        
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=f"⏳ *Deleting broadcast from {len(records)} users' chats...*", parse_mode="Markdown")
+        except Exception:
+            pass
+        
+        def run_delete_task():
+            deleted_count = 0
+            for target_id, msg_id in records:
+                safe_delete_message(target_id, msg_id)
+                deleted_count += 1
+                time.sleep(0.05)
+            
+            broadcast_store.pop(bcast_id, None)
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=f"🧹 *Broadcast Deleted!*\n\n✅ `{deleted_count}` members ke inbox se broadcast message delete kar diya gaya hai.", parse_mode="Markdown")
+            except Exception:
+                bot.send_message(chat_id, f"🧹 *Broadcast Deleted!*\n\n✅ `{deleted_count}` members ke inbox se broadcast message delete kar diya gaya hai.", parse_mode="Markdown")
+                
+        threading.Thread(target=run_delete_task, daemon=True).start()
+        return
 
     if is_user_admitted(user_id):
         try:
