@@ -145,7 +145,8 @@ def is_user_admitted(user_id):
     if admissions_col is not None:
         try:
             record = admissions_col.find_one({"userId": user_id_str})
-            if record and record.get("name"):
+            # Only count as admitted if record has a name AND was NOT just an imported member
+            if record and record.get("name") and record.get("date") != "Imported Previous Member":
                 admitted[user_id_str] = record
                 return True
         except Exception as e:
