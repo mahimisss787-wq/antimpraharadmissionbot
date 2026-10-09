@@ -316,6 +316,18 @@ def handle_broadcast(message):
     bcast_id = str(int(time.time()))
     broadcast_store[bcast_id] = []
 
+    adjusted_entities = None
+    if not has_reply and message.entities and text_to_send:
+        prefix_len = message.text.find(text_to_send)
+        if prefix_len != -1:
+            adjusted_entities = []
+            for entity in message.entities:
+                if entity.offset >= prefix_len:
+                    import copy
+                    e = copy.copy(entity)
+                    e.offset -= prefix_len
+                    adjusted_entities.append(e)
+
     def run_broadcast_task():
         success_count = 0
         failed_count = 0
@@ -330,7 +342,10 @@ def handle_broadcast(message):
                     )
                     msg_id = sent.message_id
                 else:
-                    sent = bot.send_message(chat_id=target_id, text=text_to_send, parse_mode="Markdown")
+                    if adjusted_entities:
+                        sent = bot.send_message(chat_id=target_id, text=text_to_send, entities=adjusted_entities)
+                    else:
+                        sent = bot.send_message(chat_id=target_id, text=text_to_send, parse_mode="Markdown")
                     msg_id = sent.message_id
                     
                 success_count += 1
