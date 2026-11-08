@@ -374,6 +374,144 @@ def handle_broadcast(message):
 
 # --- COMMAND HANDLERS ---
 
+@bot.message_handler(commands=['info'])
+def handle_info(message):
+    user_id = str(message.from_user.id)
+    if user_id != str(ADMIN_ID):
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    target_id = parts[1].strip() if len(parts) > 1 else ""
+    
+    # Support replying to an approval card to extract User ID
+    if not target_id and message.reply_to_message:
+        reply_text = message.reply_to_message.text or ""
+        import re
+        match = re.search(r"User ID:\s*`?(\d+)`?", reply_text)
+        if match:
+            target_id = match.group(1)
+        elif message.reply_to_message.forward_from:
+            target_id = str(message.reply_to_message.forward_from.id)
+    
+    if not target_id:
+        bot.reply_to(message, "⚠️ *Usage:* `/info <User_ID>` ya kisi user card/message par **Reply** karke `/info` likhein.", parse_mode="Markdown")
+        return
+    
+    if admissions_col is None:
+        bot.reply_to(message, "⚠️ MongoDB connected nahi hai. Data dekh nahi sakte.")
+        return
+    
+    try:
+        record = admissions_col.find_one({"userId": target_id})
+        if not record:
+            bot.reply_to(message, f"❌ User ID `{target_id}` ka koi record nahi mila.", parse_mode="Markdown")
+            return
+        
+        name = record.get("name", "N/A")
+        preparation = record.get("preparation", "N/A")
+        state = record.get("state", "N/A")
+        username = record.get("username", "N/A")
+        first_name = record.get("firstName", "N/A")
+        date = record.get("date", "N/A")
+        status = record.get("status", "N/A")
+        registered_at = record.get("registeredAt", "N/A")
+        
+        status_emoji = {"approved": "✅", "pending": "⏳", "rejected": "❌"}.get(status, "❓")
+        
+        info_text = (
+            f"📋 *Student Details*\n\n"
+            f"👤 *Name:* {name}\n"
+            f"🆔 *User ID:* `{target_id}`\n"
+            f"🔗 *Username:* {username}\n"
+            f"📛 *First Name:* {first_name}\n"
+            f"📚 *Preparation:* {preparation}\n"
+            f"📍 *State:* {state}\n"
+            f"📅 *Admission Date:* {date}\n"
+            f"🕐 *First Seen:* {registered_at}\n"
+            f"{status_emoji} *Status:* {status}"
+        )
+        bot.reply_to(message, info_text, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Failed to fetch user info: {e}")
+        bot.reply_to(message, f"⚠️ Error: {e}")
+
+@bot.message_handler(commands=['members'])
+def handle_members(message):
+    user_id = str(message.from_user.id)
+    if user_id != str(ADMIN_ID):
+        return
+    
+    if admissions_col is None:
+        bot.reply_to(message, "⚠️ MongoDB connected nahi hai. Data dekh nahi sakte.")
+        return
+    
+    try:
+        # Parse optional filter: /members approved, /members pending, /members rejected
+        parts = message.text.split(maxsplit=1)
+        status_filter = parts[1].strip().lower() if len(parts) > 1 else None
+        
+        query = {"userId": {"$ne": "system_init"}}
+        if status_filter in ["approved", "pending", "rejected"]:
+            query["status"] = status_filter
+        
+        records = list(admissions_col.find(query).sort("date", -1))
+        
+        if not records:
+            filter_text = f" ({status_filter})" if status_filter else ""
+            bot.reply_to(message, f"📭 Koi student record nahi mila{filter_text}.")
+            return
+        
+        # Count by status
+        total = len(records)
+        approved_count = sum(1 for r in records if r.get("status") == "approved")
+        pending_count = sum(1 for r in records if r.get("status") == "pending")
+        rejected_count = sum(1 for r in records if r.get("status") == "rejected")
+        imported_count = sum(1 for r in records if r.get("date") == "Imported Previous Member")
+        
+        header = (
+            f"📊 *Members Summary*\n\n"
+            f"👥 Total: `{total}`\n"
+            f"✅ Approved: `{approved_count}`\n"
+            f"⏳ Pending: `{pending_count}`\n"
+            f"❌ Rejected: `{rejected_count}`\n"
+            f"📦 Imported: `{imported_count}`\n"
+            f"{'─' * 30}\n\n"
+        )
+        
+        # Build member list (limit to avoid Telegram message size limit)
+        member_lines = []
+        for i, r in enumerate(records[:50], 1):
+            name = r.get("name", "N/A")
+            uid = r.get("userId", "N/A")
+            date = r.get("date", "N/A")
+            status = r.get("status", "N/A")
+            prep = r.get("preparation", "N/A")
+            status_emoji = {"approved": "✅", "pending": "⏳", "rejected": "❌"}.get(status, "📦")
+            
+            member_lines.append(
+                f"{status_emoji} *{i}. {name}*\n"
+                f"    🆔 `{uid}` | 📚 {prep}\n"
+                f"    📅 {date}\n"
+            )
+        
+        full_text = header + "\n".join(member_lines)
+        
+        if total > 50:
+            full_text += f"\n\n⚠️ _Sirf pehle 50 dikha rahe hain. Total {total} records hain._"
+        
+        # Telegram message limit is ~4096 chars, split if needed
+        if len(full_text) > 4000:
+            # Send in chunks
+            chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+            for chunk in chunks:
+                bot.send_message(message.chat.id, chunk, parse_mode="Markdown")
+        else:
+            bot.reply_to(message, full_text, parse_mode="Markdown")
+            
+    except Exception as e:
+        logging.error(f"Failed to fetch members: {e}")
+        bot.reply_to(message, f"⚠️ Error: {e}")
+
 @bot.message_handler(commands=['resetall'])
 def handle_reset_all(message):
     user_id = str(message.from_user.id)
@@ -496,7 +634,7 @@ def handle_callback_query(call):
         # Generate invite link for the user
         invite_link = "https://t.me"
         try:
-            expire_time = int(time.time()) + 120  # 2 minute valid link
+            expire_time = int(time.time()) + 300  # 5 minute valid link
             res = bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_time)
             invite_link = res.invite_link
         except Exception as e:
@@ -510,7 +648,7 @@ def handle_callback_query(call):
             f"📚 *Preparation:* {pending['preparation']}\n"
             f"📍 *State:* {pending['state']}\n\n"
             f"🌟 Aapka *Antimprahar Study Group* mein welcome hai! Aapki seat confirm kar li gayi hai.\n\n"
-            f"🚀 Niche button par click karke group mein add ho jayein (Link valid for 2 minutes)."
+            f"🚀 Niche button par click karke group mein add ho jayein (Link valid for 5 minutes)."
         )
         user_markup = InlineKeyboardMarkup()
         user_markup.add(InlineKeyboardButton("🚀 Join Study Group Now", url=invite_link))
