@@ -1454,11 +1454,19 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
 
     try:
-        bot.remove_webhook(drop_pending_updates=True)
-        time.sleep(1)
+        bot.remove_webhook()
+        time.sleep(2)
         logging.info("Existing webhook removed successfully.")
     except Exception as e:
         logging.warning(f"Could not remove webhook: {e}")
+        
+    try:
+        updates = bot.get_updates(offset=-1, timeout=1)
+        if updates:
+            bot.get_updates(offset=updates[-1].update_id + 1, timeout=1)
+        logging.info("Pending updates cleared.")
+    except Exception as e:
+        logging.warning(f"Could not clear pending updates: {e}")
         
     while True:
         try:
